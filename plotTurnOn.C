@@ -5,69 +5,81 @@ void plotTurnOn()
 {
   const std::string recFilePath = "/eos/cms/store/group/phys_heavyions/ikucher/MB2_run327237/HIMinimumBias2/Forest_HIMinimumBias2_run327237_merged.root";
   const std::vector<std::pair<std::string, std::string> > hltFilePath = {
-      {"Online", "/eos/cms/store/group/phys_heavyions/anstahll/HLT2021/TREE/OpenHLTTree_HIMinBias_103X_dataRun2_HLT_Run327237.root"},
-      {"Miscalibrated", "/eos/cms/store/group/phys_heavyions/anstahll/HLT2021/TREE/OpenHLTTree_HIMinBias_103X_dataRun2_HLT_ForHITestsV3_Run327237.root"}
+      {"Online", "/eos/cms/store/group/phys_heavyions/anstahll/HLT2021/TREE/OpenHLTTree_HIMinBias_103X_dataRun2_HLT_NoZS_20200521.root"},
+      {"Miscalibrated", "/eos/cms/store/group/phys_heavyions/anstahll/HLT2021/TREE/OpenHLTTree_HIMinBias_103X_dataRun2_HLT_ForHITestsV3_NoZS_20200521.root"}
   };
   const std::map<std::string, int> COLOR = { {"Online", kBlack}, {"Miscalibrated", kRed} };
 
-  // get online information
-  std::map<std::string, TriggerReader> triggerInfo;
-  for (const auto& c : hltFilePath) {
-    triggerInfo.emplace(std::piecewise_construct, std::forward_as_tuple(c.first), std::forward_as_tuple(c.second, true));
-  }
-
-  // get offline
-  RecoReader recoInfo(recFilePath);
-  
-  // add trigger paths to trigger reader
-  std::set<std::string> doParticle;
-  for (const auto& t : TRIGLIST) {
-    for (const auto& path : t.second) {
-      for (auto& c : triggerInfo) {
-        c.second.addTrigger(path);
-      }
-    }
-    if      (t.first.rfind("Electron")!=std::string::npos) { doParticle.insert("electron"); }
-    else if (t.first.rfind("Photon"  )!=std::string::npos) { doParticle.insert("photon");   }
-    else if (t.first.rfind("Muon"    )!=std::string::npos) { doParticle.insert("muon");     }
-  }
-
-  // initialize offline information
-  for (const auto& p : doParticle) { recoInfo.initBranches(p); }
-
   // initialize efficiency objects
-  std::map<std::string, std::map<std::string, std::map<std::string, std::map<std::string, TEfficiency> > > > effMap;
-  for (const auto& t : TRIGLIST) {
-    for (const auto& path : t.second) {
-      for (const auto& b : BINMAP.at(t.first)) {
-        const std::string name = "eff"+t.first+"_"+path+"_"+b.first;
+  TH1::AddDirectory(kFALSE);
+  std::vector<TEfficiency> effVec;
+  std::map<std::string, std::map<std::string, std::map<std::string, std::string> > > effMapTitle;
+  std::map<std::string, std::map<std::string, std::map<std::string, std::map<std::string, size_t> > > > effMapIdx;
+  for (const auto& p : TRIGLIST) {
+    for (const auto& t : p.second) {
+      for (const auto& b : BINMAP.at(p.first)) {
+        const std::string name = "eff"+p.first+"_"+t+"_"+b.first;
+        effMapTitle[p.first][t][b.first] = name;
         for (const auto& c : hltFilePath) {
-          auto& eff = effMap[t.first][path][b.first][c.first];
-          eff = TEfficiency("", "", b.second.size()-1, b.second.data());
-          eff.SetName((name+"_"+c.first).c_str());
-          eff.SetTitle(name.c_str());
+          effVec.emplace_back(TEfficiency("", "", b.second.size()-1, b.second.data()));
+          effVec.back().SetName((name+"_"+c.first).c_str());
+          effMapIdx[p.first][t][b.first][c.first] = effVec.size()-1;
         }
       }
     }
   }
 
-  // fill efficiencies
-  const auto nEntries = recoInfo.getEntries();
-  for (Long64_t iEntry=0; iEntry<nEntries; iEntry++) {
-    if ((iEntry%10000)==0) { std::cout << "[INFO] Processing event " << iEntry << " / " << nEntries << std::endl; }
-    recoInfo.setEntry(iEntry, true, true);
-    bool ignoreEvent = false;
-    for (auto& c : triggerInfo) {
-      if (!c.second.setEntry(recoInfo.getEventNumber(), true, true)) { ignoreEvent = true; break; }
+  std::set<std::string> doParticle;
+  for (const auto& t : TRIGLIST) {
+    if      (t.first.rfind("Electron")!=std::string::npos) { doParticle.insert("electron"); }
+    else if (t.first.rfind("Photon"  )!=std::string::npos) { doParticle.insert("photon");   }
+    else if (t.first.rfind("Muon"    )!=std::string::npos) { doParticle.insert("muon");     }
+  }
+
+  // prepare multi-threading
+  const int nCores = doParticle.size()*hltFilePath.size();
+  ROOT::EnableImplicitMT();
+  ROOT::TProcessExecutor mpe(nCores);
+
+  TH1::AddDirectory(kFALSE);
+  auto fillEfficiency = [=](int idx)
+  {
+    auto c_start = std::clock();
+    const auto& n = doParticle.size();
+    const auto& hltFileP = hltFilePath[idx/n];
+    const auto& pTag = *std::next(doParticle.begin(), idx%n);
+    auto parName = pTag; parName[0] = toupper(parName[0]);
+
+    std::set<int> idxS;
+    std::vector<TEfficiency> effV(effVec);
+
+    // get offline
+    RecoReader recoInfo(recFilePath, false);
+
+    // get online information
+    TriggerReader triggerInfo(hltFileP.second, true);
+
+    // add trigger paths to trigger reader
+    for (const auto& t : TRIGLIST) {
+      for (const auto& path : t.second) {
+        triggerInfo.addTrigger(path);
+      }
     }
-    if (ignoreEvent) continue;
-    // check that event pass event selection
-    if (!recoInfo.passEventSelection()) continue;
-    const auto cent = recoInfo.getCentrality();
-    // loop over particle type
-    for (const auto& p : doParticle) {
-      std::string parName = p; parName[0] = toupper(parName[0]);
-      const auto particles = recoInfo.getParticles(p);
+
+    // initialize offline information
+    recoInfo.initBranches(pTag);
+
+    // fill efficiencies
+    const auto nEntries = recoInfo.getEntries();
+    for (const auto& iEntry : ROOT::TSeqUL(nEntries)) {
+      if ((iEntry%100000)==0) { std::cout << "[INFO] Core " << idx << ":  Processing event " << iEntry << " / " << nEntries << std::endl; }
+      recoInfo.setEntry(iEntry, false, true);
+      if (!triggerInfo.setEntry(recoInfo.getEventNumber(), false, true)) continue;
+      // check that event pass event selection
+      if (!recoInfo.passEventSelection()) continue;
+      //const auto cent = recoInfo.getCentrality();
+      // loop over particle type
+      const auto particles = recoInfo.getParticles(pTag);
       // loop over single particles
       for (size_t iPar1=0; iPar1<particles.size(); iPar1++) {
         const auto& particle1 = particles[iPar1];
@@ -77,13 +89,13 @@ void plotTurnOn()
         auto parTag = "Single"+parName;
         if (TRIGLIST.find(parTag)!=TRIGLIST.end()) {
           for (const auto& path : TRIGLIST.at(parTag)) {
-            for (auto& c : triggerInfo) {
-              // check if trigger matched
-              const auto isMatched = c.second.isTriggerMatched(particle1.first, path);
-              // fill efficiency
-              for (const auto& v : BINMAP.at(parTag)) {
-                effMap.at(parTag).at(path).at(v.first).at(c.first).Fill(isMatched, var.at(v.first));
-              }
+            // check if trigger matched
+            const auto isMatched = triggerInfo.isTriggerMatched(particle1.first, path);
+            // fill efficiency
+            for (const auto& v : BINMAP.at(parTag)) {
+              const auto& index = effMapIdx.at(parTag).at(path).at(v.first).at(hltFileP.first);
+              effV[index].Fill(isMatched, var.at(v.first));
+              idxS.insert(index);
             }
           }
         }
@@ -97,23 +109,31 @@ void plotTurnOn()
             const auto varDP = std::map<std::string, double>({ {"Pt",  p4.Pt()}, {"Rapidity", p4.Rapidity()} });
             // loop over ddouble particle triggers
             for (const auto& path : TRIGLIST.at(parTag)) {
-              for (auto& c : triggerInfo) {
-                // check if trigger matched
-                const bool isMatched1 = c.second.isTriggerMatched(particle1.first, path);
-                const bool isMatched2 = c.second.isTriggerMatched(particle2.first, path);
-                const bool isMatched = isMatched1 && isMatched2;
-                // fill efficiency
-                for (const auto& v : BINMAP.at(parTag)) {
-                  effMap.at(parTag).at(path).at(v.first).at(c.first).Fill(isMatched, varDP.at(v.first));
-                }
+              // check if trigger matched
+              const bool isMatched1 = triggerInfo.isTriggerMatched(particle1.first, path);
+              const bool isMatched2 = triggerInfo.isTriggerMatched(particle2.first, path);
+              const bool isMatched = isMatched1 && isMatched2;
+              // fill efficiency
+              for (const auto& v : BINMAP.at(parTag)) {
+                const auto& index = effMapIdx.at(parTag).at(path).at(v.first).at(hltFileP.first);
+                effV[index].Fill(isMatched, varDP.at(v.first));
+                idxS.insert(index);
               }
             }
           }
         }
       }
     }
+    return std::make_pair(idxS, effV);
+  };
+
+  const auto& res = mpe.Map(fillEfficiency, ROOT::TSeqI(nCores));
+
+  for (const auto& r : res) {
+    for (const auto& idx : r.first) {
+      effVec[idx] = r.second[idx];
+    }
   }
-  
 
   // set plot style
   setTDRStyle();
@@ -121,13 +141,13 @@ void plotTurnOn()
   gStyle->SetOptFit(0);
 
   // plot efficiencies
-  for (const auto& p : effMap) {
+  for (const auto& p : effMapIdx) {
     for (const auto& t : p.second) {
       for (const auto& v : t.second) {
         const auto& par = p.first;
         const auto& path = t.first;
         const auto& var = v.first;
-        auto& effM = effMap.at(par).at(path).at(var);
+        const auto& idxM = v.second;
         // create Canvas
         TCanvas c("c", "c", 1000, 1000); c.cd();
         // create the text info
@@ -149,7 +169,7 @@ void plotTurnOn()
         // format efficiency
         std::vector<std::pair<std::string, TGraphAsymmErrors> > graphM;
         for (const auto& c : hltFilePath) {
-          auto& eff = effM.at(c.first);
+          auto& eff = effVec[idxM.at(c.first)];
           eff.Draw(); gPad->Update();
           graphM.push_back({c.first, *eff.GetPaintedGraph()});
           auto& graph = graphM.back().second;
@@ -164,6 +184,7 @@ void plotTurnOn()
           }
         }
         auto& graph = graphM[0].second;
+        if (graph.GetN()==0) continue;
         // add to legend
         TLegend leg(0.43, 0.74, 0.6, 0.84);
         for (auto& g : graphM) {
@@ -198,7 +219,7 @@ void plotTurnOn()
         makeDir(plotDir + "/png/");
         makeDir(plotDir + "/pdf/");
         // Save Canvas
-        const std::string name = effM.begin()->second.GetTitle();
+        const auto& name = effMapTitle[p.first][t.first][v.first];
         c.SaveAs((plotDir + "/png/" + name + ".png" ).c_str());
         c.SaveAs((plotDir + "/pdf/" + name + ".pdf" ).c_str());
         // Clean up memory

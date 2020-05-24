@@ -1,6 +1,7 @@
 #ifndef plotTurnOn_h
 #define plotTurnOn_h
 
+#include <TROOT.h>
 #include <TSystem.h>
 #include <TFile.h>
 #include <TH1.h>
@@ -16,6 +17,8 @@
 #include <TLine.h>
 #include <TLegend.h>
 #include <TLegendEntry.h>
+#include <ROOT/TProcessExecutor.hxx>
+#include <ROOT/TSeq.hxx>
 
 #include <iostream>
 #include <map>
@@ -158,24 +161,21 @@ class TriggerReader : public TreeReaderBase
     
   bool isTriggerMatched(const TLorentzVector& p4, const std::string& path) const
   {
-    // set entry on demand
+    // set entry on demand for HltTree
     if (onDemand_) { loadEntry("HltTree"); }
-    if (onDemand_) { loadEntry(path);      }
-    // check trigger bit
-    //if (path.rfind("HLT_HIL1",0)!=0 && ((!*evtI_.at(path)->Get() && obj_.at(path).at("pt")->Get()->size()>0) || (*evtI_.at(path)->Get() && obj_.at(path).at("pt")->Get()->size()==0))) { std::cout << " WWWWWWWWWWWWWWWWWWWWWWWTF: " << path << " , " << *evtI_.at(path)->Get() << " , " <<  obj_.at(path).at("pt")->Get()->size() << " , " << obj_.at(path).at("eta")->Get()->size() << " , " << obj_.at(path).at("phi")->Get()->size() << " , " << obj_.at(path).at("mass")->Get()->size() << " , " << obj_.at(path).at("TriggerObjID")->Get()->size() << std::endl; }
     if (!*evtI_.at(path)->Get()) { return false; }
+    // set entry on demand for TriggerObject
+    if (onDemand_) { loadEntry(path);      }
     // define delta R threshold
     const auto dR = (path.rfind("HLT_HIL3",0)==0 ? 0.1 : 0.3);
+    const auto dPt = (path.rfind("HLT_HIL1",0)==0 ? 2.0 : 10.0);
     // check trigger objects
     bool isMatch = false;
-    for (size_t i=0; i<obj_.at(path).at("pt")->Get()->size(); i++) {
+    for (size_t i=0; i<obj_.at(path).at("eta")->Get()->size(); i++) {
       // compare object momenta
-      TLorentzVector trigP4; trigP4.SetPtEtaPhiM(obj_.at(path).at("pt")->Get()->at(i), obj_.at(path).at("eta")->Get()->at(i), obj_.at(path).at("phi")->Get()->at(i), obj_.at(path).at("mass")->Get()->at(i));
-      if (trigP4.DeltaR(p4) < dR &&
-          std::abs(trigP4.Pt()-p4.Pt())/p4.Pt() < 10.0) {
-        isMatch = true;
-        break;
-      }
+      TLorentzVector trigP4; trigP4.SetPtEtaPhiM(obj_.at(path).at("pt")->Get()->at(i), obj_.at(path).at("eta")->Get()->at(i), obj_.at(path).at("phi")->Get()->at(i), p4.M());
+      isMatch = (path.rfind("HLT_HIL1",0)==0 ? std::abs(trigP4.Eta()-p4.Eta()) < 0.2 : trigP4.DeltaR(p4) < dR) && std::abs(trigP4.Pt()-p4.Pt())/p4.Pt() < dPt;
+      if (isMatch) break;
     }
     return isMatch;
   };
@@ -190,7 +190,7 @@ class TriggerReader : public TreeReaderBase
     const auto nm = name.substr(0,name.rfind("_v")+2);
     setTreeReader(name, "hltobject/"+nm);
     evtI_[name].reset(new TTreeReaderValue<int>(*reader_.at("HltTree"), name.c_str()));
-    for (const auto& var : {"TriggerObjID", "pt", "eta", "phi", "mass"}) {
+    for (const auto& var : {"pt", "eta", "phi"}) {
       obj_[name][var].reset(new TTreeReaderValue<std::vector<double> >(*reader_.at(name), var));
     }
   };
